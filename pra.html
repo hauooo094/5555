@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>AR 國旗識別與 3D 模型互動</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/aframe@1.4.2/dist/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            touch-action: none; /* 防止手機瀏覽器預設的縮放與下拉重整行為 */
+        }
+    </style>
+</head>
+
+<body>
+    <a-scene
+        mindar-image="imageTargetSrc: targets.mind; autoStart: true; uiLoading: true; uiError: true; uiScanning: true;"
+        color-space="sRGB"
+        renderer="colorManagement: true; physicallyCorrectLights: true"
+        vr-mode-ui="enabled: false"
+        device-orientation-permission-ui="enabled: false"
+    >
+        <a-assets>
+            <a-asset-item id="flagModel" src="taipei101_submission-v1.glb"></a-asset-item>
+        </a-assets>
+
+        <a-light type="ambient" intensity="2.5"></a-light>
+        <a-camera look-controls="enabled: false"></a-camera>
+
+        <a-entity mindar-image-target="targetIndex: 0">
+            
+            <a-entity id="interactive-container" flag-interaction>
+                
+                <a-gltf-model 
+                    src="#flagModel" 
+                    position="0 0 0" 
+                    rotation="90 0 0" 
+                    scale="1 1 1"
+                ></a-gltf-model>
+
+            </a-entity>
+
+        </a-entity>
+    </a-scene>
+
+    <script>
+        // 註冊客製化的 A-Frame 手勢互動組件：flag-interaction
+        AFRAME.registerComponent('flag-interaction', {
+            init: function () {
+                const el = this.el;
+                const scene = el.sceneEl;
+
+                // --- 狀態變數初始化 ---
+                this.defaultScale = el.object3D.scale.x; // 記錄模型初始縮放大小
+                this.currentScale = this.defaultScale;
+
+                // 雙指手勢暫存暫存
+                this.prevDistance = null; 
+
+                // 單指滑動暫存（用來計算拖曳位移）
+                this.prevTouchX = null;
+                this.prevTouchY = null;
+
+                this.lastTap = 0; // 用來計算雙擊的時間差
+
+                // 確保 A-Frame 畫布載入完成後再綁定監聽事件
+                if (scene.hasLoaded) {
+                    this.bindEvents();
+                } else {
+                    scene.addEventListener('loaded', this.bindEvents.bind(this));
+                }
+            },
+
+            bindEvents: function () {
+                const canvas = this.el.sceneEl.canvas;
+                if (!canvas) return;
+
+                // 1. 觸摸開始 (touchstart)
+                canvas.addEventListener('touchstart', (e) => {
+                    // 點擊時防禦機制：如果畫面上有多個手指，先重置單指座標
+                    if (e.touches.length === 1) {
+                        // 記錄第一隻手指的點擊位置
+                        this.prevTouchX = e.touches[0].clientX;
+                        this.prevTouchY = e.touches[0].clientY;
+                    } 
+                    else if (e.touches.length === 2) {
+                        // 雙指點擊：計算兩指間的直線距離
+                        const dx = e.touches[0].clientX - e.touches[1].clientX;
+                        const dy = e.touches[0].clientY - e.touches[1].clientY;
+                        this.prevDistance = Math.hypot(dx, dy);
+                    }
+                }, { passive: false });
+
+                // 2. 手指滑動中 (touchmove)
+                canvas.addEventListener('touchmove', (e) => {
+                    // 💡 【情境 A】單指滑動：讓 3D 模型跟著移動位置
+                    if (e.touches.length === 1 && this.prevTouchX !== null) {
+                        const currentX = e.touches[0].clientX;
+                        const currentY = e.touches[0].clientY;
+
+                        // 計算滑動的像素差 (Delta)
+                        const deltaX = currentX - this.prevTouchX;
+                        const deltaY = currentY - this.prevTouchY;
+
+                        // 靈敏度係數：將螢幕像素距離轉換為 AR 世界的座標位移（數值愈大動愈快）
+                        const moveSpeed = 0.003; 
+
+                        // 更新模型的世界座標
+                        // 畫面上左右滑動 (deltaX) 對應 3D 世界的 X 軸
+                        // 畫面上下滑動 (deltaY) 對應 3D 世界的 Y 軸（在 A-Frame 中因為旋轉關係，這裡修改 Y 軸）
+                        this.el.object3D.position.x += deltaX * moveSpeed;
+                        this.el.object3D.position.y -= deltaY * moveSpeed; // 減號是因為螢幕 Y 軸向下，AR 座標 Y 軸向上
+
+                        // 暫存當前座標，留待下一幀計算
+                        this.prevTouchX = currentX;
+                        this.prevTouchY = currentY;
+
+                        e.preventDefault(); // 阻止網頁滾動
+                    }
+
+                    // 💡 【情境 B】雙指滑動：讓 3D 模型進行縮放
+                    if (e.touches.length === 2 && this.prevDistance !== null) {
+                        const dx = e.touches[0].clientX - e.touches[1].clientX;
+                        const dy = e.touches[0].clientY - e.touches[1].clientY;
+                        const dist = Math.hypot(dx, dy); // 計算當前雙指距離
+
+                        // 計算縮放倍率 (當前距離 / 上一次的距離)
+                        const scaleFactor = dist / this.prevDistance;
+                        this.currentScale *= scaleFactor;
+
+                        // 安全限制：限制縮放範圍在 0.3 倍 到 4 倍之間，避免模型過大或不見
+                        this.currentScale = Math.min(Math.max(this.currentScale, 0.3), 4);
+                        
+                        // 套用縮放至 3D 實體
+                        this.el.object3D.scale.set(
+                            this.currentScale,
+                            this.currentScale,
+                            this.currentScale
+                        );
+
+                        // 暫存當前距離
+                        this.prevDistance = dist;
+
+                        e.preventDefault();
+                    }
+                }, { passive: false });
+
+                // 3. 手指離開螢幕 (touchend)
+                canvas.addEventListener('touchend', (e) => {
+                    const now = Date.now();
+
+                    // 重置狀態：當手指離開，清除舊的手勢暫存紀錄
+                    if (e.touches.length < 2) {
+                        this.prevDistance = null;
+                    }
+                    if (e.touches.length === 0) {
+                        this.prevTouchX = null;
+                        this.prevTouchY = null;
+                    }
+
+                    // 💡 【隱藏功能】單指快速點擊兩下：將 3D 模型的位置與大小「重置還原」
+                    if (e.changedTouches.length === 1 && e.touches.length === 0) {
+                        if (now - this.lastTap < 300) { // 點擊間隔小於 300 毫秒算雙擊
+                            
+                            // 還原位置到國旗中心點
+                            this.el.object3D.position.set(0, 0, 0);
+
+                            // 還原縮放大小
+                            this.currentScale = this.defaultScale;
+                            this.el.object3D.scale.set(this.defaultScale, this.defaultScale, this.defaultScale);
+                        }
+                        this.lastTap = now;
+                    }
+                }, { passive: false });
+            }
+        });
+    </script>
+</body>
+</html>
